@@ -100,3 +100,44 @@ def extract_keywords(text: str, top_n: int = 10) -> str:
     freq = Counter(tokens)
     return ", ".join([w for w, _ in freq.most_common(top_n)])
 
+# =========================
+# EJECUCIÓN
+# =========================
+st.subheader("1) Descargando datos de KoboToolbox")
+df_raw = fetch_kobo_csv()
+st.write(f"**Debug:** Registros descargados: {len(df_raw)}")
+
+if df_raw.empty:
+    st.warning("No se pudo cargar datos desde Kobo.")
+    st.stop()
+
+# Detectar columnas *_URL
+url_cols = [c for c in df_raw.columns if c.endswith("_URL")]
+st.write(f"**Debug:** Columnas de audio detectadas: {url_cols}")
+
+if not url_cols:
+    st.warning("No se detectaron columnas *_URL en el CSV. Revisa la exportación.")
+    st.stop()
+
+# Construir DF largo
+rows = []
+for i, rec in df_raw.iterrows():
+    municipio = rec.get("Municipio", "")
+    barrio = rec.get("Barrio/Vereda", "")
+    lat = rec.get("_Por favor captura tu ubicación (GPS)_latitude")
+    lon = rec.get("_Por favor captura tu ubicación (GPS)_longitude")
+    for col in url_cols:
+        pregunta = col.replace("_URL", "")
+        audio_url = rec.get(col)
+        rows.append({
+            "pregunta": pregunta,
+            "municipio": municipio,
+            "barrio_vereda": barrio,
+            "audio_url": audio_url,
+            "lat": lat,
+            "lon": lon,
+            "transcripcion": "",
+            "sentimiento": "",
+            "palabras_clave": ""
+        })
+
