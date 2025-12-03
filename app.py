@@ -35,7 +35,7 @@ HEADERS = {"Authorization": f"Token {API_TOKEN}"}
 # =========================
 @st.cache_data(show_spinner=False)
 def fetch_kobo_csv() -> pd.DataFrame:
-    url = f"{BASE_URL}{FORM_ID}/data.csv"
+    url = f"{BASE_URL}{FORM_ID}/data/?format=csv"
     r = requests.get(url, headers=HEADERS, timeout=60)
     if r.status_code != 200:
         st.error(f"❌ Error {r.status_code} al obtener CSV desde Kobo.")
