@@ -1,7 +1,6 @@
 
 import os
 import re
-import time
 import requests
 import pandas as pd
 import streamlit as st
@@ -35,39 +34,19 @@ HEADERS = {"Authorization": f"Token {API_TOKEN}"}
 # FUNCIONES
 # =========================
 @st.cache_data(show_spinner=False)
-def fetch_kobo_csv() -> pd.DataFrame:
-    # Intento 1: endpoint directo con ?format=csv
-    url_direct = f"{BASE_URL}{FORM_ID}/data/?format=csv"
-    st.write(f"**Debug:** Intentando descargar CSV desde {url_direct}")
-    r = requests.get(url_direct, headers=HEADERS, timeout=60)
+def fetch_kobo_json() -> pd.DataFrame:
+    url = f"{BASE_URL}{FORM_ID}/data/?format=json"
+    st.write(f"**Debug:** Intentando descargar datos JSON desde {url}")
+    r = requests.get(url, headers=HEADERS, timeout=60)
     st.write(f"**Debug:** Código de respuesta: {r.status_code}")
-    if r.status_code == 200:
-        from io import StringIO
-        return pd.read_csv(StringIO(r.text))
-
-    # Intento 2: usar exportación
-    st.warning("Intento directo falló. Creando exportación...")
-    export_url = f"{BASE_URL}{FORM_ID}/exports/"
-    payload = {"format": "csv"}
-    resp = requests.post(export_url, headers=HEADERS, json=payload)
-    if resp.status_code != 201:
-        st.error(f"❌ Error {resp.status_code} al crear exportación.")
+    if r.status_code != 200:
+        st.error(f"❌ Error {r.status_code} al obtener datos JSON desde Kobo.")
         return pd.DataFrame()
-    export_info = resp.json()
-    export_download_url = export_info.get("result", {}).get("download_url")
-    if not export_download_url:
-        st.error("❌ No se obtuvo URL de descarga en la exportación.")
+    payload = r.json()
+    results = payload.get("results", [])
+    if not results:
         return pd.DataFrame()
-    # Descargar el archivo exportado
-    full_download_url = f"https://eu.kobotoolbox.org{export_download_url}"
-    st.write(f"**Debug:** Descargando exportación desde {full_download_url}")
-    time.sleep(5)  # esperar a que se genere el archivo
-    r2 = requests.get(full_download_url, headers=HEADERS, timeout=60)
-    if r2.status_code != 200:
-        st.error(f"❌ Error {r2.status_code} al descargar exportación.")
-        return pd.DataFrame()
-    from io import StringIO
-    return pd.read_csv(StringIO(r2.text))
+    return pd.json_normalize(results)
 
 def download_audio_bytes(url: str) -> bytes:
     try:
@@ -130,7 +109,7 @@ def extract_keywords(text: str, top_n: int = 10) -> str:
 # EJECUCIÓN
 # =========================
 st.subheader("1) Descargando datos de KoboToolbox")
-df_raw = fetch_kobo_csv()
+df_raw = fetch_kobo_json()
 st.write(f"**Debug:** Registros descargados: {len(df_raw)}")
 
 if df_raw.empty:
@@ -142,7 +121,7 @@ url_cols = [c for c in df_raw.columns if c.endswith("_URL")]
 st.write(f"**Debug:** Columnas de audio detectadas: {url_cols}")
 
 if not url_cols:
-    st.warning("No se detectaron columnas *_URL en el CSV. Revisa la exportación.")
+    st.warning("No se detectaron columnas *_URL en los datos JSON.")
     st.stop()
 
 # Construir DF largo
@@ -280,3 +259,4 @@ else:
 
 # Exportación
 st.download_button(label="Descargar CSV procesado", data=df_f.to_csv(index=False), file_name="resultados_encuesta.csv", mime="text/csv")
+
