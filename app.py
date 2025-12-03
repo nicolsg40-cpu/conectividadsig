@@ -1,49 +1,130 @@
 
-import streamlit as st
+# -*- coding: utf-8 -*-
+import os
+import re
+import time
+from io import BytesIO, StringIO
+from typing import Dict, Any, List, Optional
+
+import requests
 import pandas as pd
+import streamlit as st
 import matplotlib.pyplot as plt
 import seaborn as sns
 from wordcloud import WordCloud
 
-st.set_page_config(page_title="Conectividad SIG – Dashboard", layout="wide")
+# --- Modelos (cargados cuando se usan) ---
+# Whisper para transcripción
+# Transformers para sentimiento
+from transformers import pipeline
+import whisper
+
+# =========================
+# PARÁMETROS DE KOBO
+# =========================
+API_TOKEN = "e4fcf901afb0b0853e21c29b34330017e4cf031e"
+BASE_URL = "https://eu.kobotoolbox.org/api/v2/assets/"
+FORM_ID = "a6XQZtj52WmfUix3KCDdpV"
+HEADERS = {"Authorization": f"Token {API_TOKEN}"}
+
+# Enlaces útiles:
+# CSV directo: https://eu.kobotoolbox.org/api/v2/assets/{FORM_ID}/data.csv
+# JSON con adjuntos: https://eu.kobotoolbox.org/api/v2/assets/{FORM_ID}/data/?format=json
+
+# Campos del formulario (según tu XLSForm)
+AUDIO_FIELDS = {
+    "q_conectividad_acceso": "Conectividad y calidad de internet",
+    "q_uso_oportunidades": "Uso y oportunidades digitales",
+    "q_derechos_riesgos": "Derechos y riesgos",
+    "q_participacion_futuro": "Participación y futuro",
+}
+TEXT_FIELDS = [
+    "enumerator_name",       # Tu nombre (encuestador/a)
+    "participant_code",      # Código participante (si aplica)
+    "municipio",             # Municipio
+    "barrio_vereda",         # Barrio/Vereda
+]
+GEO_FIELD = "ubicacion"      # geopoint: "lat lon alt acc"
+
+# =========================
+# CONFIG STREAMLIT
+# =========================
+st.set_page_config(
+    page_title="Conectividad SIG – Dashboard",
+    layout="wide",
+    page_icon="📊"
+)
 st.title("📊 Conectividad y Habilidades Digitales – Dashboard")
+st.caption("Flujo 100% automático: KoboToolbox → Transcripción y análisis → Visualización")
 
-uploaded_file = st.file_uploader("Sube el CSV procesado (resultados_encuesta.csv)", type=["csv"]) 
-if not uploaded_file:
-    st.info("Carga el archivo exportado desde Colab para ver el dashboard.")
-else:
-    df = pd.read_csv(uploaded_file)
+# =========================
+# UTILIDADES
+# =========================
+def parse_geopoint(geo: str) -> (Optional[float], Optional[float]):
+    """Recibe 'lat lon alt acc' y retorna (lat, lon)."""
+    if not isinstance(geo, str) or not geo.strip():
+        return None, None
+    parts = geo.split()
+    try:
+        lat = float(parts[0])
+        lon = float(parts[1])
+        return lat, lon
+    except Exception:
+        return None, None
 
-    st.sidebar.header("Filtros")
-    preguntas = st.sidebar.multiselect("Pregunta", sorted(df.get("pregunta", pd.Series()).dropna().unique().tolist()))
-    municipios = st.sidebar.multiselect("Municipio", sorted(df.get("municipio", pd.Series()).dropna().unique().tolist()))
 
-    if preguntas:
-        df = df[df["pregunta"].isin(preguntas)]
-    if municipios:
-        df = df[df["municipio"].isin(municipios)]
+@st.cache_data(show_spinner=False)
+def fetch_kobo_json() -> List[Dict[str, Any]]:
+    """Descarga datos del formulario en formato JSON, incluyendo adjuntos."""
+    url = f"{BASE_URL}{FORM_ID}/data/?format=json"
+    r = requests.get(url, headers=HEADERS, timeout=60)
+    if r.status_code != 200:
+        st.error(f"Error {r.status_code} al obtener JSON desde Kobo.")
+        return []
+    payload = r.json()
+    results = payload.get("results", [])
+    return results
 
-    st.write("### Vista previa", df.head())
 
-    if "sentimiento" in df.columns:
-        st.subheader("Distribución de sentimientos")
-        fig, ax = plt.subplots(figsize=(6,4))
-        order = ["Negativo","Neutro","Positivo","Sin texto"]
-        sns.countplot(x=df["sentimiento"], order=order, palette="coolwarm", ax=ax)
-        st.pyplot(fig)
+def find_attachment_url(record: Dict[str, Any], filename_or_value: str) -> Optional[str]:
+    """Busca en _attachments el URL de descarga para el nombre de archivo dado."""
+    if not filename_or_value:
+        return None
+    attachments = record.get("_attachments", [])
+    # Algunos campos guardan el 'filename' directamente; otras veces incluyen ruta.
+    for att in attachments:
+        fname = att.get("filename", "")
+        dl = att.get("download_url", "")
+        if not dl:
+            continue
+        full_url = f"https://eu.kobotoolbox.org{dl}"  # completar dominio
+        # Coincidencia por filename exacto o incluida en la URL
+        if filename_or_value == fname or filename_or_value in full_url:
+            return full_url
+    return None
 
-    if "transcripcion" in df.columns:
-        st.subheader("Nube de palabras")
-        texto = " ".join(df["transcripcion"].dropna().astype(str))
-        if texto.strip():
-            wc = WordCloud(width=1000, height=500, background_color="white").generate(texto)
-            fig_wc, ax_wc = plt.subplots(figsize=(12,6))
-            ax_wc.imshow(wc, interpolation="bilinear")
-            ax_wc.axis("off")
-            st.pyplot(fig_wc)
+
+def download_audio_bytes(url: str) -> Optional[bytes]:
+    """Descarga el archivo de audio protegido usando el token."""
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=120)
+        if r.status_code == 200:
+            return r.content
         else:
-            st.info("No hay texto para generar la nube.")
+            return None
+    except Exception:
+        return None
 
-    if "palabras_clave" in df.columns:
-        st.subheader("Palabras clave por respuesta")
-        st.dataframe(df[["pregunta","municipio","audio_filename","palabras_clave","transcripcion"]])
+
+@st.cache_resource(show_spinner=False)
+def load_whisper_model(model_size: str = "base"):
+    """Carga el modelo Whisper (cacheado). model_size: tiny|base|small|medium|large."""
+    return whisper.load_model(model_size)
+
+
+@st.cache_resource(show_spinner=False)
+def load_sentiment_pipeline():
+    """
+    Carga un pipeline multilingüe para análisis de sentimiento.
+    Usamos 'cardiffnlp/twitter-xlm-roberta-base-sentiment' (positivo/negativo/neutral).
+    """
