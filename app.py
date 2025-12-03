@@ -22,9 +22,9 @@ import whisper
 # =========================
 # PARÁMETROS DE KOBO
 # =========================
-API_TOKEN = "e4fcf901afb0b0853e21c29b34330017e4cf031e"
+API_TOKEN = st.secrets["API_TOKEN"]
 BASE_URL = "https://eu.kobotoolbox.org/api/v2/assets/"
-FORM_ID = "a6XQZtj52WmfUix3KCDdpV"
+FORM_ID = st.secrets["FORM_ID"]
 HEADERS = {"Authorization": f"Token {API_TOKEN}"}
 
 # Enlaces útiles:
