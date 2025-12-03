@@ -1,6 +1,7 @@
 
 import os
 import re
+import time
 import requests
 import pandas as pd
 import streamlit as st
@@ -35,13 +36,38 @@ HEADERS = {"Authorization": f"Token {API_TOKEN}"}
 # =========================
 @st.cache_data(show_spinner=False)
 def fetch_kobo_csv() -> pd.DataFrame:
-    url = f"{BASE_URL}{FORM_ID}/data/?format=csv"
-    r = requests.get(url, headers=HEADERS, timeout=60)
-    if r.status_code != 200:
-        st.error(f"❌ Error {r.status_code} al obtener CSV desde Kobo.")
+    # Intento 1: endpoint directo con ?format=csv
+    url_direct = f"{BASE_URL}{FORM_ID}/data/?format=csv"
+    st.write(f"**Debug:** Intentando descargar CSV desde {url_direct}")
+    r = requests.get(url_direct, headers=HEADERS, timeout=60)
+    st.write(f"**Debug:** Código de respuesta: {r.status_code}")
+    if r.status_code == 200:
+        from io import StringIO
+        return pd.read_csv(StringIO(r.text))
+
+    # Intento 2: usar exportación
+    st.warning("Intento directo falló. Creando exportación...")
+    export_url = f"{BASE_URL}{FORM_ID}/exports/"
+    payload = {"format": "csv"}
+    resp = requests.post(export_url, headers=HEADERS, json=payload)
+    if resp.status_code != 201:
+        st.error(f"❌ Error {resp.status_code} al crear exportación.")
+        return pd.DataFrame()
+    export_info = resp.json()
+    export_download_url = export_info.get("result", {}).get("download_url")
+    if not export_download_url:
+        st.error("❌ No se obtuvo URL de descarga en la exportación.")
+        return pd.DataFrame()
+    # Descargar el archivo exportado
+    full_download_url = f"https://eu.kobotoolbox.org{export_download_url}"
+    st.write(f"**Debug:** Descargando exportación desde {full_download_url}")
+    time.sleep(5)  # esperar a que se genere el archivo
+    r2 = requests.get(full_download_url, headers=HEADERS, timeout=60)
+    if r2.status_code != 200:
+        st.error(f"❌ Error {r2.status_code} al descargar exportación.")
         return pd.DataFrame()
     from io import StringIO
-    return pd.read_csv(StringIO(r.text))
+    return pd.read_csv(StringIO(r2.text))
 
 def download_audio_bytes(url: str) -> bytes:
     try:
@@ -141,3 +167,116 @@ for i, rec in df_raw.iterrows():
             "palabras_clave": ""
         })
 
+df = pd.DataFrame(rows)
+st.write(f"**Debug:** Filas construidas: {len(df)}")
+
+# Filtrar audios válidos
+df = df[df["audio_url"].astype(str).str.startswith("http")].reset_index(drop=True)
+st.write(f"**Debug:** Filas con audio_url válido: {len(df)}")
+
+if df.empty:
+    st.warning("No hay audios válidos para procesar.")
+    st.stop()
+
+# Parámetros
+st.sidebar.header("Parámetros de procesamiento")
+model_size = st.sidebar.selectbox("Tamaño modelo Whisper", ["tiny", "base", "small"], index=1)
+max_to_process = st.sidebar.slider("Máximo de audios a transcribir", 1, min(50, len(df)), min(10, len(df)))
+
+# Procesamiento
+st.subheader("2) Transcribiendo audios y analizando texto")
+whisper_model = load_whisper_model(model_size)
+senti = load_sentiment_pipeline()
+
+progress = st.progress(0)
+processed = 0
+for idx in df.index[:max_to_process]:
+    url = df.at[idx, "audio_url"]
+    b = download_audio_bytes(url)
+    text = transcribe_audio(b, whisper_model) if b else ""
+    df.at[idx, "transcripcion"] = text
+    if text.strip():
+        try:
+            res = senti(text)[0]
+            df.at[idx, "sentimiento"] = map_sentiment(res.get("label", ""))
+        except Exception:
+            df.at[idx, "sentimiento"] = "Sin texto"
+    else:
+        df.at[idx, "sentimiento"] = "Sin texto"
+    df.at[idx, "palabras_clave"] = extract_keywords(text)
+    processed += 1
+    progress.progress(int(processed / max_to_process * 100))
+progress.empty()
+
+st.write(f"**Debug:** Transcripciones generadas: {(df['transcripcion'].astype(str).str.strip()!='').sum()} / {len(df)}")
+
+# =========================
+# DASHBOARD
+# =========================
+st.success("✅ ¡Procesamiento completo!")
+
+# Filtros
+st.sidebar.header("Filtros")
+preguntas_sel = st.sidebar.multiselect("Pregunta", sorted(df["pregunta"].dropna().unique().tolist()))
+municipios_sel = st.sidebar.multiselect("Municipio", sorted(df["municipio"].dropna().unique().tolist()))
+sentimientos_sel = st.sidebar.multiselect("Sentimiento", ["Negativo", "Neutro", "Positivo", "Sin texto"])
+
+df_f = df.copy()
+if preguntas_sel:
+    df_f = df_f[df_f["pregunta"].isin(preguntas_sel)]
+if municipios_sel:
+    df_f = df_f[df_f["municipio"].isin(municipios_sel)]
+if sentimientos_sel:
+    df_f = df_f[df_f["sentimiento"].isin(sentimientos_sel)]
+
+# Distribución de sentimientos
+st.subheader("Distribución de sentimientos")
+fig, ax = plt.subplots(figsize=(7,4))
+order = ["Negativo", "Neutro", "Positivo", "Sin texto"]
+sns.countplot(x=df_f["sentimiento"], order=order, palette="coolwarm", ax=ax)
+ax.set_xlabel("")
+ax.set_ylabel("Conteo")
+st.pyplot(fig)
+
+# Nube de palabras
+st.subheader("Nube de palabras (transcripciones)")
+texto = " ".join(df_f["transcripcion"].dropna().astype(str))
+if texto.strip():
+    wc = WordCloud(width=1200, height=500, background_color="white").generate(texto)
+    fig_wc, ax_wc = plt.subplots(figsize=(12,6))
+    ax_wc.imshow(wc, interpolation="bilinear")
+    ax_wc.axis("off")
+    st.pyplot(fig_wc)
+else:
+    st.info("No hay texto para generar la nube.")
+
+# Tabla detallada
+st.subheader("Detalle por respuesta")
+st.dataframe(df_f[["pregunta","municipio","audio_url","palabras_clave","sentimiento","transcripcion"]])
+
+# Reproductor de audio
+st.subheader("Escuchar audios (muestra)")
+N = st.slider("Cantidad de audios a mostrar", 1, min(20, len(df_f)), min(10, len(df_f)))
+for _, row in df_f.head(N).iterrows():
+    st.markdown(f"**{row['pregunta']} – {row['municipio']}**")
+    b = download_audio_bytes(row["audio_url"])
+    if b:
+        st.audio(b, format="audio/mp3")
+    else:
+        st.info("Audio no disponible.")
+    st.caption(f"Palabras clave: {row['palabras_clave']}")
+    if row["transcripcion"]:
+        with st.expander("Ver transcripción"):
+            st.write(row["transcripcion"])
+    st.divider()
+
+# Mapa
+st.subheader("Mapa de envíos")
+map_df = df_f.dropna(subset=["lat","lon"])[["lat","lon"]].rename(columns={"lat":"latitude","lon":"longitude"})
+if not map_df.empty:
+    st.map(map_df, zoom=10)
+else:
+    st.info("No hay coordenadas GPS en los envíos seleccionados.")
+
+# Exportación
+st.download_button(label="Descargar CSV procesado", data=df_f.to_csv(index=False), file_name="resultados_encuesta.csv", mime="text/csv")
