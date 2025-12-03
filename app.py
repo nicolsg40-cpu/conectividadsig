@@ -5,48 +5,45 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from wordcloud import WordCloud
 
-# Configuración de la página
-st.set_page_config(page_title="Dashboard Encuesta", layout="wide")
+st.set_page_config(page_title="Conectividad SIG – Dashboard", layout="wide")
+st.title("📊 Conectividad y Habilidades Digitales – Dashboard")
 
-st.title("📊 Dashboard de Encuesta sobre Conectividad y Habilidades Digitales")
-
-# Subir archivo CSV
-uploaded_file = st.file_uploader("Sube el archivo CSV procesado", type=["csv"])
-if uploaded_file:
+uploaded_file = st.file_uploader("Sube el CSV procesado (resultados_encuesta.csv)", type=["csv"]) 
+if not uploaded_file:
+    st.info("Carga el archivo exportado desde Colab para ver el dashboard.")
+else:
     df = pd.read_csv(uploaded_file)
 
-    # Filtros
     st.sidebar.header("Filtros")
-    preguntas = st.sidebar.multiselect("Filtrar por pregunta", df["pregunta"].unique())
-    genero = st.sidebar.multiselect("Filtrar por género", df["genero"].dropna().unique())
-    ciudad = st.sidebar.multiselect("Filtrar por ciudad", df["ciudad"].dropna().unique())
+    preguntas = st.sidebar.multiselect("Pregunta", sorted(df.get("pregunta", pd.Series()).dropna().unique().tolist()))
+    municipios = st.sidebar.multiselect("Municipio", sorted(df.get("municipio", pd.Series()).dropna().unique().tolist()))
 
-    # Aplicar filtros
     if preguntas:
         df = df[df["pregunta"].isin(preguntas)]
-    if genero:
-        df = df[df["genero"].isin(genero)]
-    if ciudad:
-        df = df[df["ciudad"].isin(ciudad)]
+    if municipios:
+        df = df[df["municipio"].isin(municipios)]
 
-    st.write("### Vista previa de datos filtrados", df.head())
+    st.write("### Vista previa", df.head())
 
-    # Gráfico de sentimientos
-    st.subheader("Distribución de Sentimientos")
-    fig, ax = plt.subplots(figsize=(6,4))
-    sns.countplot(x=df["sentimiento"], palette="coolwarm", ax=ax)
-    st.pyplot(fig)
+    if "sentimiento" in df.columns:
+        st.subheader("Distribución de sentimientos")
+        fig, ax = plt.subplots(figsize=(6,4))
+        order = ["Negativo","Neutro","Positivo","Sin texto"]
+        sns.countplot(x=df["sentimiento"], order=order, palette="coolwarm", ax=ax)
+        st.pyplot(fig)
 
-    # Nube de palabras
-    st.subheader("Nube de Palabras")
-    texto_completo = " ".join(df["transcripcion"].dropna())
-    wordcloud = WordCloud(width=800, height=400, background_color="white").generate(texto_completo)
-    fig_wc, ax_wc = plt.subplots(figsize=(10,6))
-    ax_wc.imshow(wordcloud, interpolation="bilinear")
-    ax_wc.axis("off")
-    st.pyplot(fig_wc)
+    if "transcripcion" in df.columns:
+        st.subheader("Nube de palabras")
+        texto = " ".join(df["transcripcion"].dropna().astype(str))
+        if texto.strip():
+            wc = WordCloud(width=1000, height=500, background_color="white").generate(texto)
+            fig_wc, ax_wc = plt.subplots(figsize=(12,6))
+            ax_wc.imshow(wc, interpolation="bilinear")
+            ax_wc.axis("off")
+            st.pyplot(fig_wc)
+        else:
+            st.info("No hay texto para generar la nube.")
 
-    # Tabla de palabras clave
     if "palabras_clave" in df.columns:
         st.subheader("Palabras clave por respuesta")
-        st.dataframe(df[["pregunta", "palabras_clave"]])
+        st.dataframe(df[["pregunta","municipio","audio_filename","palabras_clave","transcripcion"]])
